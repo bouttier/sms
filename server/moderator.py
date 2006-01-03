@@ -63,7 +63,7 @@ class Moderator(Thread):
                     if data:
                         if self.awaiting[s]: # Modération
                             response = data.strip().decode('UTF-8')
-                            if response == "o":
+                            if response == "o" or response == "":
                                 self.send(self.awaiting[s][0],
                                         self.awaiting[s][1])
                                 self.awaiting[s] = None
