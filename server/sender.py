@@ -35,8 +35,8 @@ class Sender(Thread):
         # La queue devra contenir des données binaire
         self.message_queues = {}
 
-    ''' Méthode appelé lorsqu’un sms doit être envoyé vers les clients '''
     def send(self, phone, message):
+        ''' Méthode appelé lorsqu’un sms doit être envoyé vers les clients '''
         for s in self.clients: # Pour chaque client
             # Ajout du sms dans sa queue d’envoit
             self.message_queues[s].put(bytes("[%s] %s\n" %(phone, message),
@@ -49,8 +49,8 @@ class Sender(Thread):
         # valeur de outputs
         os.write(self.pipe_w, bytes('\0', 'UTF-8'))
         
-    ''' Méthode lancé par la fonction start() hérité de la classe Thread '''
     def run(self):
+        ''' Méthode lancé par la fonction start() hérité de la classe Thread '''
         while self.server: # On s’arrête si le serveur est cassé
             readable, writable, exceptional = select.select(
                     # On écoute les clients, le serveur (connexions entrantes),
