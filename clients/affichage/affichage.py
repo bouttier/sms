@@ -14,6 +14,7 @@ from threading import Thread
 from Queue import Queue, Empty
 import cPickle
 import settings
+from time import sleep
 
 
 class RecvSMS(Thread):
@@ -23,15 +24,28 @@ class RecvSMS(Thread):
         self.queue = queue
         self.daemon = True
 
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((settings.SERVER, settings.PORT))
-            
     def run(self):
         while True:
-            receive = self.socket.recv(1024).rstrip("\r\n").decode('UTF-8')
-            match = re.match( r'\[[+]?(\d*)\] (.*)', receive, re.M)
-            if match:
-                self.queue.put(match.group(2))
+            try:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.connect((settings.SERVER, settings.PORT))
+                print('connection to %s:%s established' %(settings.SERVER,
+                    settings.PORT))
+            except socket.error:
+                sleep(1)
+                continue
+            else:
+                while True:
+                    receive = self.socket.recv(1024).rstrip("\r\n").decode('UTF-8')
+                    if receive:
+                        match = re.match( r'\[[+]?(\d*)\] (.*)', receive, re.M)
+                        if match:
+                            self.queue.put(match.group(2))
+                    else: # déconnexion
+                        print('connection to %s:%s lost' %(settings.SERVER,
+                            settings.PORT))
+                        break
+
 
 
 class BandeauDefilant(object):
@@ -110,7 +124,8 @@ def run():
 
     pygame.mouse.set_visible(0)
 
-    zone_aff = calibrer_ecran(ecran)
+    #zone_aff = calibrer_ecran(ecran)
+    zone_aff = ecran.get_rect()
     ecran.set_clip(zone_aff)
 
     if settings.FONT[-4:] == '.ttf':
