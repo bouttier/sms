@@ -15,6 +15,11 @@ class Sender(Thread):
         Thread.__init__(self)
         self.daemon = True
 
+        self.pipe_r, self.pipe_w = os.pipe()
+        self.init_server()
+        
+
+    def init_server(self):
         # Création serveur
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -23,7 +28,6 @@ class Sender(Thread):
         print('started output server on port', OUTPUT_PORT)
         self.server.listen(5)
         
-        self.pipe_r, self.pipe_w = os.pipe()
         self.clients = []
         self.outputs = []
         self.message_queues = {}
@@ -54,18 +58,26 @@ class Sender(Thread):
                     os.read(self.pipe_r, 1)
 
                 else: # Client
-                    data = s.recv(1024)
-                    if data:
-                        self.message_queues[s].put(
-                            bytes('Désolé, je n’écoute pas\n', 'UTF-8'))
-                        if s not in self.outputs:
-                            self.outputs.append(s)
-                    else: # Déconnexion
+                    try:    
+                        data = s.recv(1024)
+                    except socket.error:
                         self.clients.remove(s)
                         if s in self.outputs:
                             self.outputs.remove(s)
                         s.close()
                         del self.message_queues[s]
+                    else:
+                        if data:
+                            self.message_queues[s].put(
+                                bytes('Désolé, je n’écoute pas\n', 'UTF-8'))
+                            if s not in self.outputs:
+                                self.outputs.append(s)
+                        else: # Déconnexion
+                            self.clients.remove(s)
+                            if s in self.outputs:
+                                self.outputs.remove(s)
+                            s.close()
+                            del self.message_queues[s]
 
             for s in writable: # Il est possible d’envoyer des données
                 try:
@@ -75,9 +87,8 @@ class Sender(Thread):
                 else:
                     s.send(next_msg)
 
-            for s in exceptional: # Déconnexion sur erreur
-                self.clients.remove(s)
-                if s in self.outputs:
-                    self.outputs.remove(s)
+            for s in exceptional: # Server planté
+                for client in self.clients:
+                    client.close()
                 s.close()
-                del self.message_queues[s]
+                self.init_server() # reboot du server

@@ -17,7 +17,11 @@ class Moderator(Thread):
         Thread.__init__(self)
         self.daemon = True
         self.send = send
+        self.pipe_r, self.pipe_w = os.pipe()
+        self.sms = Queue() # sms en attente de modération
+        self.init_server()
 
+    def init_server(self):
         # Création serveur
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -26,9 +30,7 @@ class Moderator(Thread):
         self.server.listen(5)
         print('started moderation server on port', MOD_PORT)
 
-        self.pipe_r, self.pipe_w = os.pipe()
         self.outputs = []
-        self.sms = Queue() # sms en attente de modération
         self.free = deque() # modérateur en attente de sms
         self.awaiting = {} # sms attribué à un modérateur
         self.queues = {} # queues d’envoit
@@ -89,20 +91,27 @@ class Moderator(Thread):
             for s in writable: # Il est possible d’envoyer des données
                 try:
                     next_msg = self.queues[s].get_nowait()
+                    s.send(next_msg)
                 except queue.Empty: # Envoit terminé
                     self.outputs.remove(s)
-                else:
-                    s.send(next_msg)
+                except socket.error:
+                    if s in self.outputs:
+                        self.outputs.remove(s)
+                    if s in self.free:
+                        self.free.remove(s)
+                    if self.awaiting[s]:
+                        self.sms.put(self.awaiting[s])
+                    del self.awaiting[s]
+                    s.close()
 
-            for s in exceptional: # Déconnexion sur erreur
-                if s in self.outputs:
-                    self.outputs.remove(s)
-                if s in self.free:
-                    self.free.remove(s)
-                if self.awaiting[s]:
-                    self.sms.put(self.awaiting[s])
-                del self.awaiting[s]
+
+            for s in exceptional: # Serveur planté
+                for client in clients:
+                    if self.awaiting[client]:
+                        self.sms.put(self.awaiting[client])
+                    client.close()
                 s.close()
+                self.init_server() # Reboot du serveur
             
             while not self.sms.empty(): # Il reste des sms à modérer
                 try:
