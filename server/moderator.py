@@ -7,130 +7,111 @@ import select
 import queue
 import os
 from queue import Queue
+from collections import deque
 
 
 class Moderator(Thread):
     
     def __init__(self, send):
         
-        Thread.__init__(self) # Constructeur de la classe parente
-        self.daemon = True # Ne pas attendre la fin du thread pour quitter
-
-        # Création de la socket
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Option reuseaddr (permet de réutiliser l’adresse sans délai de 1 min)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Socket non bloquante, on va utiliser select
-        self.server.setblocking(0)
-        # On bind la socket en écoute de toutes les adresse
-        self.server.bind( ('', MOD_PORT) )
-        print('started moderation server on port', MOD_PORT)
-        # Définie le nombre maximal de connexion attendant d’être acceptées
-        self.server.listen(5)
-        # Création d’un pipe, pipe_w est l’entrée et pipe_r la sortie
-        self.pipe_r, self.pipe_w = os.pipe()
-
-        self.clients = [] # Pour les clients
-        self.outputs = [] # Pour les clients avec des données en cours d’envoit
-        # Message en cours d’envoit vers les clients
-        # Les queues devront contenir des données binaire
-        self.message_queues = {}
-        # Les messages en cours de modération
-        self.moderation = {}
-        # La fonction pour les messages accepté
+        Thread.__init__(self)
+        self.daemon = True
         self.send = send
-        # La queue des messages à modérer
-        self.queue = Queue()
 
-    ''' Méthode appelé lorsqu’un sms doit être envoyé vers les clients '''
+        # Création serveur
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.setblocking(0)
+        self.server.bind( ('', MOD_PORT) )
+        self.server.listen(5)
+        print('started moderation server on port', MOD_PORT)
+
+        self.pipe_r, self.pipe_w = os.pipe()
+        self.outputs = []
+        self.sms = Queue() # sms en attente de modération
+        self.free = deque() # modérateur en attente de sms
+        self.awaiting = {} # sms attribué à un modérateur
+        self.queues = {} # queues d’envoit
+
     def moderate(self, phone, message):
-        self.queue.put((phone, message), True, None)
-        os.write(self.pipe_w, bytes('\0', 'UTF-8'))
+        ''' fonction appelé lorsqu’un nouveau sms est à modérer '''
+        self.sms.put((phone, message), True, None)
+        os.write(self.pipe_w, bytes('\0', 'UTF-8')) # Réveille du select
         
-    ''' Méthode lancé par la fonction start() hérité de la classe Thread '''
     def run(self):
-        while self.server: # On s’arrête si le serveur est cassé
+        while self.server:
             readable, writable, exceptional = select.select(
-                    # On écoute les clients, le serveur (connexions entrantes),
-                    # et pipe_r qui permet de réveiller le select lorsque l’on
-                    # veut le relancer avec de nouveaux masques.
-                    [self.server, self.pipe_r] + self.clients, # input
+                    [self.server, self.pipe_r] + list(self.awaiting.keys()), # input
                     self.outputs, # output
                     [self.server]) # error
 
             for s in readable:
                 if s is self.server: # Connexion entrante
-                    client, address = self.server.accept() # Acceptation
-                    client.setblocking(0) # Socket non bloquante (select)
-                    self.clients.append(client) # On rajoute dans les clients
-                    self.message_queues[client] = queue.Queue() # Queue dédié
+                    modo, address = self.server.accept()
+                    modo.setblocking(0)
+                    self.awaiting[modo] = None
+                    self.free.appendleft(modo)
+                    self.queues[modo] = Queue()
 
-                elif s is self.pipe_r: # Utilisé pour réveiller select
-                    # Il faut consommer le caratère pour que cela continue de
-                    # marcher.
+                elif s is self.pipe_r: # Nouveau sms à modérer
                     os.read(self.pipe_r, 1)
 
-                else: # Client
+                else: # Modo
                     data = s.recv(1024)
                     if data:
-                        if s in self.moderation.keys():
+                        if self.awaiting[s]: # Modération
                             response = data.strip().decode('UTF-8')
                             if response == "o":
-                                phone, message = self.moderation[s]
-                                self.send(phone, message)
-                                del self.moderation[s]
+                                self.send(self.awaiting[s][0],
+                                        self.awaiting[s][1])
+                                self.awaiting[s] = None
+                                self.free.appendleft(s)
                             elif response == "n":
-                                del self.moderation[s]
+                                self.awaiting[s] = None
+                                self.free.appendleft(s)
                             else:
-                                # On rajoute notre message dans la queue d’envoit
-                                self.message_queues[s].put(
+                                self.queues[s].put(
                                     bytes("Veuillez répondre par 'o' ou 'n'\n", 'UTF-8'))
                                 if s not in self.outputs:
                                     self.outputs.append(s)
-                        else: # le mec dit de la merde
+                        else: # Le mec dit de la merde
                             pass
-                    else: # Pas de données à lire
-                        # Cela signifie que le client à fermer la connexion
-                        self.clients.remove(s)
+                    else: # Déconnexion
                         if s in self.outputs:
                             self.outputs.remove(s)
+                        if s in self.free:
+                            self.free.remove(s)
+                        if self.awaiting[s]:
+                            self.sms.put(self.awaiting[s])
+                        del self.awaiting[s]
                         s.close()
-                        if s in self.message_queues.keys():
-                            del self.message_queues[s]
-                        if s in self.moderation.keys():
-                            # on remet le message dans la queue de modération
-                            self.queue.put(self.moderation[s])
-                            del self.moderation[s]
 
             for s in writable: # Il est possible d’envoyer des données
                 try:
-                    # Récupération des prochaines données à envoyer
-                    next_msg = self.message_queues[s].get_nowait()
-                except queue.Empty:
-                    # Plus rien à envoyer, plus besoin de surveiller les
-                    # possibilitées d’envoit vers ce client
+                    next_msg = self.queues[s].get_nowait()
+                except queue.Empty: # Envoit terminé
                     self.outputs.remove(s)
                 else:
-                    s.send(next_msg) # envoit
+                    s.send(next_msg)
 
-            for s in exceptional: # Erreur avec ce client, déconnexion
-                self.clients.remove(s)
+            for s in exceptional: # Déconnexion sur erreur
                 if s in self.outputs:
                     self.outputs.remove(s)
+                if s in self.free:
+                    self.free.remove(s)
+                if self.awaiting[s]:
+                    self.sms.put(self.awaiting[s])
+                del self.awaiting[s]
                 s.close()
-                if s in self.message_queues.keys():
-                    del self.message_queues[s]
-                if s in self.moderation.keys():
-                    del self.moderation[s]
-        
-            for s in self.clients: # Pour chaque client
-                if s not in self.moderation: # qui ne modère rien
-                    try:
-                        sms = self.queue.get_nowait()
-                    except queue.Empty: # empty queue
-                        break
-                    else:
-                        self.message_queues[s].put(bytes("Voulez-vous accepter ce"
-                            + " message ? [o/n]\n[%s] %s\n" %sms, 'UTF-8'))
-                        self.outputs.append(s)
-                        self.moderation[s] = sms
+            
+            while not self.sms.empty(): # Il reste des sms à modérer
+                try:
+                    modo = self.free.pop()
+                except IndexError: # Plus de modérateur disponible
+                    break
+                else:
+                    sms = self.sms.get()
+                    self.awaiting[modo] = sms
+                    self.queues[modo].put(bytes("Voulez-vous accepter ce"
+                        + " message ? [o/n]\n[%s] %s\n" %sms, 'UTF-8'))
+                    self.outputs.append(modo)
